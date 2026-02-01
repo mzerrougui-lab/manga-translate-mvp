@@ -1,314 +1,106 @@
-# MangaTranslate MVP - Fixed Version
+# MangaTranslate MVP (Streamlit)
 
-## Summary of Fixes
+A simple “manga page translator” MVP:
+- Upload a manga page image
+- Detect text regions (speech bubbles / captions) using **EasyOCR**
+- Extract text (OCR)
+- Translate the extracted text using **OpenAI** (recommended) or **LibreTranslate**
+- Export results as **JSON / CSV** + a preview image with numbered boxes
 
-This version fixes critical issues with EasyOCR language compatibility, repeated model downloads, and OpenAI 429 rate limit errors.
-
----
-
-## Fixed Issues
-
-### 1. ✅ EasyOCR Language Compatibility Errors
-
-**Problem:**
-```
-ValueError: Chinese_sim is only compatible with English, try lang_list=['ch_sim','en']
-```
-
-**Solution:**
-- Created `safe_easyocr_lang_list(primary)` function
-- Chinese (ch_sim/ch_tra) is **ALWAYS** paired with ['en'] only
-- Japanese, Korean paired with ['en'] for better results
-- Other languages validated before use
-
-**Where:** `app.py` (lines 31-59), `sandbox_worker.py` (lines 24-46)
+> Note: This project focuses on a clean pipeline + export. It does **not** do perfect bubble cleaning / inpainting yet (that’s a future upgrade).
 
 ---
 
-### 2. ✅ Stopped Repeated Model Downloads
+## How it works (pipeline)
 
-**Problem:**
-- EasyOCR downloaded models (100-500MB) on every Streamlit rerun
-- Users saw "Downloading recognition model" message repeatedly
-- Slow performance (2-5 minutes per operation)
-
-**Solution:**
-- Added `@st.cache_resource` decorator to cache EasyOCR readers
-- Readers are cached by language tuple (hashable key)
-- Models download ONCE per language combination, then reused
-- **Performance improvement: 5-6x faster after first run**
-
-**Where:** `app.py` (lines 62-71)
-
-```python
-@st.cache_resource(show_spinner=False)
-def get_easyocr_reader(langs: Tuple[str, ...]):
-    """Cached - downloads models only once!"""
-    return easyocr.Reader(list(langs), gpu=False)
-```
+1) **Image upload** (PNG/JPG)  
+2) **OCR (EasyOCR)**  
+   - Finds text boxes + reads text
+   - The app uses “safe language combos” internally because EasyOCR has compatibility rules (e.g., Japanese/Chinese models require pairing with English).
+3) **Language detection (heuristic)**  
+   - If you choose Auto mode, the app guesses the source language from detected characters (Arabic/Japanese/Korean/Chinese/etc.).
+4) **Translation**
+   - **OpenAI**: translates text (can be sequential to reduce 429 rate limits).
+   - **LibreTranslate**: fallback option (public instances may throttle or be unstable).
+5) **Export**
+   - `results.json` and `results.csv`
+   - `annotated.png` (numbered bounding boxes so you can review reading order)
 
 ---
 
-### 3. ✅ Auto Language Detection (Safe Multi-Pass)
+## Run on Windows (no terminal commands)
 
-**Problem:**
-- Old auto-detect tried to use incompatible language combinations
-- Crashed with Chinese + other languages
+1) Download/clone the repo  
+2) Double-click:
+- `install.bat` (first time)
+- `start.bat` (every time you want to run)
 
-**Solution:**
-- **Pass 1:** Safe multi-lang reader (ja, ko, en, ar, fr) - NO Chinese
-- **Pass 2:** If < 4 boxes found, try Chinese separately (ch_sim + en)
-- Pick result with more detected text boxes
-
-**Where:** `app.py` (lines 87-109), `sandbox_worker.py` (lines 49-66)
+Then open:
+- http://localhost:8501
 
 ---
 
-### 4. ✅ Batched OpenAI Translation (No More 429 Errors)
+## API keys (translation)
 
-**Problem:**
-- Old code made 1 API request per text bubble
-- For 20 bubbles = 20 requests = HIGH 429 rate limit errors
-- Translation failed silently, returned original text
+### OpenAI (recommended)
+You need an OpenAI API key to translate with OpenAI.
+- Put it in the app UI when asked, **or**
+- Set environment variable: `OPENAI_API_KEY`
 
-**Solution:**
-- **Batched translation:** All texts in ONE request (or chunks of 18)
-- Added exponential backoff with retries on 429 errors
-- Respects `Retry-After` header when present
-- Proper JSON parsing with fallback handling
+If you see **OpenAI error: 429**, it means you hit rate limits (too many requests / not enough quota). Fixes:
+- Use **sequential translation**
+- Translate fewer bubbles per run
+- Wait a bit and retry
+- Make sure your key has billing/quota enabled in your OpenAI account
 
-**Performance:**
-- Before: 20 bubbles = 20 API calls = frequent 429 errors
-- After: 20 bubbles = 2 API calls (18+2) = rare 429 errors
-
-**Where:** `translate_utils.py` (lines 62-143), `sandbox_worker.py` (lines 177-254)
-
-```python
-def translate_openai_batch(texts, src, tgt, api_key, model):
-    """Translate ALL texts in ONE request"""
-    # Build JSON payload with all texts
-    # Single API call
-    # Parse JSON response
-    # Return all translations
-```
+### LibreTranslate (fallback)
+LibreTranslate public endpoints are often rate-limited and sometimes return the same text unchanged.
+If you want stable LibreTranslate, you usually need a **self-hosted** instance or a paid endpoint.
 
 ---
 
-### 5. ✅ Unicode-Based Language Detection
+## Daytona mode (optional)
 
-**Added:** Heuristic language detection for auto mode
+If you enable the Daytona path:
+- OCR + translation can run inside a Daytona sandbox (isolated execution)
+- Useful for hackathon story: “we run untrusted processing in a secure isolated environment”
 
-**Where:** `translate_utils.py` (lines 19-47)
-
-Detects:
-- Arabic (0x0600-0x06FF)
-- Japanese (Hiragana/Katakana)
-- Korean (Hangul)
-- Chinese (CJK Ideographs)
-- French (accented characters)
-- Default: English
+You still need the same translation API key (OpenAI / LibreTranslate).
 
 ---
 
-## File Changes Summary
+## Known limitations (honest notes)
 
-### app.py (Main Streamlit App)
-**Changes:**
-1. Added `safe_easyocr_lang_list()` for language compatibility
-2. Added `@st.cache_resource` for EasyOCR reader caching
-3. Added `run_ocr_auto()` for safe auto-detection
-4. Updated UI to support "auto" language option
-5. Integrated batched translation
-
-**Key Functions:**
-- `safe_easyocr_lang_list(primary)` → List[str]
-- `get_easyocr_reader(langs)` → cached EasyOCR.Reader
-- `run_ocr(img_np, primary_lang)` → OCR results
-- `run_ocr_auto(img_np)` → (detected_lang, results)
+- OCR quality depends heavily on image clarity, font style, and resolution.
+- Reading order is a heuristic (numbered boxes help you verify).
+- OpenAI can rate limit (429) depending on your plan/quota.
+- LibreTranslate public endpoints may fail or return unchanged text.
+- This MVP does not yet erase original bubble text or typeset translated text into bubbles.
 
 ---
 
-### translate_utils.py (Translation Backend)
-**Changes:**
-1. Added `detect_batch_language()` using Unicode ranges
-2. Rewrote `translate_openai_batch()` with:
-   - Single-request batching
-   - Exponential backoff on 429
-   - Retry-After header support
-   - Proper JSON parsing
-3. Updated `translate_batch()` to use batching (18 texts/chunk)
+## Built with
 
-**Key Functions:**
-- `detect_batch_language(items)` → str
-- `translate_openai_batch(texts, ...)` → List[str]
-- `translate_batch(items, ...)` → List[Dict]
+- Python
+- Streamlit (UI)
+- EasyOCR (OCR)
+- OpenAI API (translation)
+- LibreTranslate (optional fallback)
+- Pillow / NumPy / Pandas (image + exports)
 
 ---
 
-### sandbox_worker.py (Daytona Worker)
-**Changes:**
-1. Added `safe_easyocr_lang_list()` (same as app.py)
-2. Added `run_ocr_auto()` for auto-detection
-3. Implemented batched OpenAI translation
-4. Updated CLI to support --ocr_lang=auto
+## Project structure (main files)
 
-**Usage:**
-```bash
-python sandbox_worker.py \
-  --image input.png \
-  --ocr_lang auto \
-  --target_lang en \
-  --backend OpenAI \
-  --openai_key sk-... \
-  --openai_model gpt-4o-mini
-```
+- `app.py` — Streamlit UI + pipeline
+- `ocr_utils.py` — OCR helpers + safe language handling
+- `translate_utils.py` — translation backends + retry logic
+- `export_utils.py` — JSON/CSV/image export helpers
+- `sandbox_worker.py` — Daytona sandbox worker (optional)
+- `install.bat`, `start.bat` — Windows launchers
 
 ---
 
-## Installation & Usage
+## License
 
-### Quick Start
-1. Replace old files with these fixed versions:
-   - `app.py`
-   - `translate_utils.py`
-   - `sandbox_worker.py`
-
-2. Run the app:
-```bash
-streamlit run app.py
-```
-
-3. First run will download EasyOCR models (2-5 minutes)
-4. Subsequent runs will be **5-6x faster** (10-30 seconds)
-
----
-
-## Performance Comparison
-
-| Operation | Before | After | Improvement |
-|-----------|--------|-------|-------------|
-| First OCR run | 2-5 min | 2-5 min | Same (must download) |
-| Second OCR run (same lang) | 2-5 min | 10-30 sec | **10x faster** |
-| Auto-detect (5 languages) | 10-25 min | 2-5 min | **5x faster** |
-| OpenAI translation (20 texts) | 20 requests | 2 requests | **10x fewer** |
-| 429 error rate | ~50% | <5% | **90% reduction** |
-
----
-
-## Testing Checklist
-
-- [x] EasyOCR works with Chinese (ch_sim)
-- [x] No repeated model downloads
-- [x] Auto language detection works
-- [x] OpenAI batched translation works
-- [x] 429 errors are retried with backoff
-- [x] LibreTranslate still works as fallback
-- [x] Daytona sandbox mode works
-- [x] All outputs (PNG/JSON/CSV) generated correctly
-
----
-
-## Common Issues & Solutions
-
-### Issue: "Chinese_sim is only compatible with English"
-**Fixed!** The `safe_easyocr_lang_list()` function now ensures Chinese is always paired with English only.
-
-### Issue: Models downloading repeatedly
-**Fixed!** The `@st.cache_resource` decorator caches readers across Streamlit reruns.
-
-### Issue: OpenAI 429 rate limit errors
-**Fixed!** Batched translation reduces API calls by 10x and includes exponential backoff with retries.
-
-### Issue: Translation returns original text
-**Fixed!** Proper error handling shows error tags (e.g., "[OpenAI failed: 429]") instead of silently failing.
-
----
-
-## Architecture Notes
-
-### EasyOCR Caching Strategy
-```
-First call: get_easyocr_reader(("ja", "en"))
-  ↓ Downloads models (2-5 min)
-  ↓ Stores in Streamlit cache
-  ↓ Returns reader
-
-Second call: get_easyocr_reader(("ja", "en"))
-  ↓ Checks cache (instant)
-  ↓ Returns cached reader
-  ↓ No download!
-
-Different languages: get_easyocr_reader(("ar", "en"))
-  ↓ New cache key
-  ↓ Downloads Arabic models (2-5 min)
-  ↓ Stores in cache
-```
-
-### OpenAI Batching Strategy
-```
-Old approach (1 request per text):
-20 texts → 20 API calls → HIGH 429 risk
-
-New approach (batched):
-20 texts → [18 texts] + [2 texts] → 2 API calls → LOW 429 risk
-Each batch: 1 request with JSON array
-```
-
----
-
-## API Usage Notes
-
-### OpenAI Request Format
-```json
-{
-  "model": "gpt-4o-mini",
-  "messages": [
-    {
-      "role": "system",
-      "content": "You are a precise translator. Output strictly as JSON only."
-    },
-    {
-      "role": "user",
-      "content": "{\"source_language\":\"ja\",\"target_language\":\"en\",\"segments\":[\"text1\",\"text2\",...]}"
-    }
-  ],
-  "temperature": 0.2
-}
-```
-
-### Expected Response
-```json
-{
-  "translations": ["translation1", "translation2", ...]
-}
-```
-
----
-
-## Backward Compatibility
-
-✅ **All existing features preserved:**
-- Manual language selection still works
-- LibreTranslate still available as fallback
-- Daytona sandbox mode unchanged
-- All output formats (PNG/JSON/CSV) unchanged
-
-🆕 **New features:**
-- Auto language detection
-- Cached EasyOCR readers
-- Batched OpenAI translation
-- Better error messages
-
----
-
-## Credits
-
-**Fixed by:** Claude (Anthropic)
-**Original Project:** MangaTranslate MVP
-**Technologies:** EasyOCR, OpenAI GPT-4, Streamlit, Daytona
-
----
-
-**Ready to use! 🚀**
-
-All critical issues have been resolved. The app now runs significantly faster and more reliably.
+See `LICENSE`.
